@@ -1,68 +1,44 @@
-// Uses Brevo's HTTP API (https://www.brevo.com) instead of raw SMTP.
-//
-// WHY: Render's free web service tier blocks outbound SMTP socket
-// connections (ports 587/465) -- that's the exact cause of the
-// "ETIMEDOUT / command: CONN" error you were seeing. It works locally
-// because your home network allows those ports out; Render's free
-// tier doesn't. An HTTP API call (plain HTTPS on port 443) is not
-// blocked, so this works identically in both places -- and you stay
-// on Render, no need to move hosting.
-//
-// SETUP:
-//   1. Sign up free at https://www.brevo.com (no card required)
-//   2. Dashboard -> Settings (gear icon) -> SMTP & API -> API Keys ->
-//      Generate a new API key -> copy it
-//   3. In Render -> your backend service -> Environment tab, add:
-//        BREVO_API_KEY=xkeysib-your-key-here
-//   4. SENDER_EMAIL below must be an email address you've verified as
-//      a "Sender" in Brevo (Settings -> Senders & IP -> Senders ->
-//      Add a Sender). Until you verify one, use the email address you
-//      signed up to Brevo with -- that one is auto-verified.
+import nodemailer from 'nodemailer';
 
-const BREVO_API_URL = 'https://api.brevo.com/v3/smtp/email';
-const SENDER_EMAIL = process.env.SENDER_EMAIL; // must be a verified sender in Brevo
-const SENDER_NAME = process.env.SENDER_NAME || 'TensorixAI Notifications';
+// Plain SMTP via nodemailer.
+//
+// NOTE: Render's web services block outbound SMTP connections
+// (ports 587/465) on ALL plans, free and paid -- this is a platform-
+// level restriction, not something an upgrade removes. This will
+// work when run locally (npm run dev) but will very likely fail with
+// an ETIMEDOUT / "command: CONN" error once deployed on Render,
+// exactly like before. If that happens again, the fix is either an
+// HTTP-API email provider (Brevo/SendGrid/Mailgun/Resend) or hosting
+// this backend somewhere that allows outbound SMTP (a VPS, Railway,
+// Fly.io, etc).
 
 const sendEmail = async (options) => {
-    if (!process.env.BREVO_API_KEY) {
-        console.error('[EmailUtils] BREVO_API_KEY is missing from .env -- cannot send email.');
-        throw new Error('Email service is not configured (missing BREVO_API_KEY).');
-    }
-    if (!SENDER_EMAIL) {
-        console.error('[EmailUtils] SENDER_EMAIL is missing from .env -- cannot send email.');
-        throw new Error('Email service is not configured (missing SENDER_EMAIL).');
-    }
-
-    const payload = {
-        sender: { name: SENDER_NAME, email: SENDER_EMAIL },
-        to: [{ email: options.email }],
-        replyTo: options.replyTo ? { email: options.replyTo } : undefined,
-        subject: options.subject,
-        textContent: options.message,
-        htmlContent: options.html || options.message.replace(/\n/g, '<br>'),
-    };
-
-    console.log(`[EmailUtils] Dispatching email via Brevo to: ${options.email}`);
-
-    const response = await fetch(BREVO_API_URL, {
-        method: 'POST',
-        headers: {
-            'api-key': process.env.BREVO_API_KEY,
-            'Content-Type': 'application/json',
-            'Accept': 'application/json',
+    const transporter = nodemailer.createTransport({
+        host: process.env.EMAIL_HOST,
+        port: Number(process.env.EMAIL_PORT) || 587,
+        secure: Number(process.env.EMAIL_PORT) === 465, // true for 465, false for other ports (STARTTLS)
+        auth: {
+            user: process.env.EMAIL_USER,
+            pass: process.env.EMAIL_PASS,
         },
-        body: JSON.stringify(payload),
     });
 
-    const data = await response.json();
+    console.log(`[EmailUtils] Initializing SMTP: ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT} with User: ${process.env.EMAIL_USER}`);
 
-    if (!response.ok) {
-        console.error('[EmailUtils] Brevo API error:', data);
-        throw new Error(data.message || 'Failed to send email via Brevo.');
-    }
+    const mailOptions = {
+        from: `"TensorixAI Notifications" <${process.env.EMAIL_USER}>`,
+        to: options.email,
+        replyTo: options.replyTo,
+        subject: options.subject,
+        text: options.message,
+        html: options.html || options.message.replace(/\n/g, '<br>'),
+    };
 
-    console.log(`[EmailUtils] Email accepted by Brevo! messageId: ${data.messageId}`);
-    return data;
+    console.log(`[EmailUtils] Dispatching email to: ${options.email}`);
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`[EmailUtils] Email sent! messageId: ${info.messageId}`);
+    return info;
 };
 
 export default sendEmail;
