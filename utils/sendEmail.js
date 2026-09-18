@@ -16,7 +16,10 @@ const sendEmail = async (options) => {
             },
             tls: {
                 rejectUnauthorized: false // Helps in certain development environments
-            }
+            },
+            // Force IPv4: some hosts (e.g. Render) don't have an outbound route
+            // to Gmail's IPv6 address and fail with ENETUNREACH otherwise.
+            family: 4
         });
     } else {
         // Fallback to testing account so the code doesn't crash during development
