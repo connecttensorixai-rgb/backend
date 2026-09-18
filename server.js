@@ -1,6 +1,13 @@
 import express from "express";
 import dotenv from "dotenv";
 import cors from "cors";
+import dns from "node:dns";
+
+// Prefer IPv4 for outbound DNS lookups. Some hosts (Render's free tier
+// included) don't have an outbound route to certain services' IPv6
+// addresses and fail with ENETUNREACH otherwise — this affects any
+// outbound connection (SMTP, MongoDB, etc.), not just one library.
+dns.setDefaultResultOrder("ipv4first");
 
 import connectDB from "./config/db.js";
 import contactRoutes from "./routes/contactRoutes.js";
