@@ -32,7 +32,7 @@ const app = express();
 
 app.use(
   cors({
-    origin: "*",
+    origin: ["https://tensorixai.com", "https://www.tensorixai.com"],
     methods: ["GET", "POST", "PUT", "DELETE"],
   }),
 );
