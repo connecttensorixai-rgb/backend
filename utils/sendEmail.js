@@ -1,53 +1,86 @@
-import nodemailer from 'nodemailer';
+import { google } from 'googleapis';
 
-// Gmail via OAuth2 (not a plain app-password login).
+// Sends mail via the official googleapis client, calling the Gmail REST API
+// over HTTPS (port 443) instead of raw SMTP (port 465/587).
 //
-// WHY: Google's SMTP frequently blocks/times out plain username +
-// app-password logins coming from cloud/datacenter IPs (like
-// Render's) as a security measure -- that's what caused the
-// ETIMEDOUT/ENETUNREACH errors before. OAuth2 token-based login is
-// trusted from any IP, which is why this approach works reliably
-// from Render.
-//
-// SETUP (already done for this project):
-//   In Render -> backend service -> Environment tab:
-//     GMAIL_USER=connect.tensorixai@gmail.com
-//     GMAIL_CLIENT_ID=(from Google Cloud Credentials page)
-//     GMAIL_CLIENT_SECRET=(from Google Cloud Credentials page)
-//     GMAIL_REFRESH_TOKEN=(from OAuth Playground)
-//
-//   Remember: go to Google Cloud Console -> OAuth consent screen ->
-//   "Publish App" so the refresh token doesn't expire after 7 days
-//   (the default limit while an OAuth app is in "Testing" mode).
+// WHY: nodemailer's `service: 'gmail'` OAuth2 transport still opens a raw
+// SMTP connection under the hood -- OAuth2 only changes how you
+// authenticate once connected, not the transport protocol. Render (like
+// many hosts) blocks outbound SMTP ports entirely, so that connection
+// always times out no matter which auth method is used. The Gmail API
+// sends mail as a normal HTTPS request instead, which is never blocked.
+// This mirrors the approach already proven working on the same host for
+// another project (jova-backend), using the official client library
+// instead of hand-rolled token refresh/HTTP calls.
+
+// Must match the redirect URI used when the refresh token was generated
+// via OAuth Playground.
+const OAUTH_PLAYGROUND_REDIRECT = 'https://developers.google.com/oauthplayground';
+
+const oauth2Client = new google.auth.OAuth2(
+    process.env.GMAIL_CLIENT_ID,
+    process.env.GMAIL_CLIENT_SECRET,
+    OAUTH_PLAYGROUND_REDIRECT
+);
+oauth2Client.setCredentials({ refresh_token: process.env.GMAIL_REFRESH_TOKEN });
+
+const gmail = google.gmail({ version: 'v1', auth: oauth2Client });
+
+// Gmail's API expects a base64url-encoded raw RFC 2822 message, not a
+// { to, from, subject, html } object -- this builds that message by hand.
+function buildRawMessage({ from, to, replyTo, subject, text, html }) {
+    const boundary = `boundary_${Date.now()}`;
+    const headers = [
+        `From: ${from}`,
+        `To: ${to}`,
+        replyTo ? `Reply-To: ${replyTo}` : null,
+        `Subject: ${subject}`,
+        'MIME-Version: 1.0',
+        `Content-Type: multipart/alternative; boundary="${boundary}"`,
+    ].filter(Boolean).join('\r\n');
+
+    const body = [
+        `--${boundary}`,
+        'Content-Type: text/plain; charset="UTF-8"',
+        '',
+        text,
+        `--${boundary}`,
+        'Content-Type: text/html; charset="UTF-8"',
+        '',
+        html,
+        `--${boundary}--`,
+    ].join('\r\n');
+
+    const message = `${headers}\r\n\r\n${body}`;
+
+    return Buffer.from(message)
+        .toString('base64')
+        .replace(/\+/g, '-')
+        .replace(/\//g, '_')
+        .replace(/=+$/, '');
+}
 
 const sendEmail = async (options) => {
-    const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-            type: 'OAuth2',
-            user: process.env.GMAIL_USER,
-            clientId: process.env.GMAIL_CLIENT_ID,
-            clientSecret: process.env.GMAIL_CLIENT_SECRET,
-            refreshToken: process.env.GMAIL_REFRESH_TOKEN,
-        },
-    });
+    console.log(`[EmailUtils] Initializing Gmail API transport for: ${process.env.GMAIL_USER}`);
 
-    console.log(`[EmailUtils] Initializing Gmail OAuth2 transport for: ${process.env.GMAIL_USER}`);
-
-    const mailOptions = {
+    const raw = buildRawMessage({
         from: `"TensorixAI Notifications" <${process.env.GMAIL_USER}>`,
         to: options.email,
         replyTo: options.replyTo,
         subject: options.subject,
         text: options.message,
         html: options.html || options.message.replace(/\n/g, '<br>'),
-    };
+    });
 
     console.log(`[EmailUtils] Dispatching email to: ${options.email}`);
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`[EmailUtils] Email sent! messageId: ${info.messageId}`);
-    return info;
+    const res = await gmail.users.messages.send({
+        userId: 'me',
+        requestBody: { raw },
+    });
+
+    console.log(`[EmailUtils] Email sent! messageId: ${res.data.id}`);
+    return res.data;
 };
 
 export default sendEmail;
