@@ -1,55 +1,60 @@
 import nodemailer from 'nodemailer';
 
-// Gmail via OAuth2 (not a plain app-password login).
-//
-// WHY: Google's SMTP frequently blocks/times out plain username +
-// app-password logins coming from cloud/datacenter IPs (like
-// Render's) as a security measure -- that's what caused the
-// ETIMEDOUT error before. OAuth2 token-based login is trusted from
-// any IP, which is why the other Render project using this same
-// approach (GMAIL_REFRESH_TOKEN + GMAIL_USER) works fine.
-//
-// SETUP:
-//   If you already have a Google Cloud OAuth app set up for the
-//   other project (jova-backend), you can reuse the exact same
-//   GMAIL_CLIENT_ID / GMAIL_CLIENT_SECRET / GMAIL_REFRESH_TOKEN /
-//   GMAIL_USER values here -- copy them from that project's Render
-//   Environment tab into this project's Environment tab. No need to
-//   generate new ones unless you want a different sending account.
-//
-//   In Render -> this backend service -> Environment tab, add:
-//     GMAIL_USER=the gmail address that sends the mail
-//     GMAIL_CLIENT_ID=(from the Google Cloud OAuth app)
-//     GMAIL_CLIENT_SECRET=(from the Google Cloud OAuth app)
-//     GMAIL_REFRESH_TOKEN=(the long-lived refresh token)
-
 const sendEmail = async (options) => {
-    const transporter = nodemailer.createTransport({
-        service: 'gmail',
-        auth: {
-            type: 'OAuth2',
-            user: process.env.GMAIL_USER,
-            clientId: process.env.GMAIL_CLIENT_ID,
-            clientSecret: process.env.GMAIL_CLIENT_SECRET,
-            refreshToken: process.env.GMAIL_REFRESH_TOKEN,
-        },
-    });
+    // Determine context (use Ethereal for testing if proper SMTP isn't provided)
+    let transporter;
 
-    console.log(`[EmailUtils] Initializing Gmail OAuth2 transport for: ${process.env.GMAIL_USER}`);
+    if (process.env.EMAIL_HOST && process.env.EMAIL_USER) {
+        console.log(`[EmailUtils] Initializing SMTP: ${process.env.EMAIL_HOST}:${process.env.EMAIL_PORT} with User: ${process.env.EMAIL_USER}`);
+        transporter = nodemailer.createTransport({
+            host: process.env.EMAIL_HOST,
+            port: Number(process.env.EMAIL_PORT),
+            secure: process.env.EMAIL_PORT == 465, // Port 465 uses direct SSL
+            auth: {
+                user: process.env.EMAIL_USER,
+                pass: process.env.EMAIL_PASS,
+            },
+            tls: {
+                rejectUnauthorized: false // Helps in certain development environments
+            },
+            // Force IPv4: some hosts (e.g. Render) don't have an outbound route
+            // to Gmail's IPv6 address and fail with ENETUNREACH otherwise.
+            family: 4
+        });
+    } else {
+        // Fallback to testing account so the code doesn't crash during development
+        console.warn('[EmailUtils] SMTP credentials not found in .env, falling back to Ethereal Email for testing.');
+        const testAccount = await nodemailer.createTestAccount();
+        transporter = nodemailer.createTransport({
+            host: "smtp.ethereal.email",
+            port: 587,
+            secure: false,
+            auth: {
+                user: testAccount.user,
+                pass: testAccount.pass,
+            },
+        });
+    }
 
-    const mailOptions = {
-        from: `"TensorixAI Notifications" <${process.env.GMAIL_USER}>`,
+    const message = {
+        from: `"Tensorix AI Notifications" <${process.env.EMAIL_USER}>`,
         to: options.email,
-        replyTo: options.replyTo,
+        replyTo: options.replyTo, // Important: Allows admin to reply direct to patient
         subject: options.subject,
         text: options.message,
-        html: options.html || options.message.replace(/\n/g, '<br>'),
+        html: options.html || options.message.replace(/\n/g, '<br>') // Support HTML for better deliverability
     };
 
     console.log(`[EmailUtils] Dispatching email to: ${options.email}`);
+    const info = await transporter.sendMail(message);
 
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`[EmailUtils] Email sent! messageId: ${info.messageId}`);
+    console.log(`[EmailUtils] Message accepted by server! MessageId: ${info.messageId}`);
+
+    // Preview URL will only be available if using Ethereal Test Account
+    if (!process.env.EMAIL_HOST) {
+        console.log('[EmailUtils] Preview URL: %s', nodemailer.getTestMessageUrl(info));
+    }
+
     return info;
 };
 
